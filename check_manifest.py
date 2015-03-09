@@ -27,6 +27,7 @@ import tarfile
 import tempfile
 import zipfile
 from contextlib import contextmanager, closing
+from xml.etree import cElementTree as ET
 
 try:
     import ConfigParser
@@ -35,7 +36,7 @@ except ImportError:
     import configparser as ConfigParser
 
 
-__version__ = '0.21.dev0'
+__version__ = '0.24.dev0'
 __author__ = 'Marius Gedminas <marius@gedmin.as>'
 __licence__ = 'MIT'
 __url__ = 'https://github.com/mgedmin/check-manifest'
@@ -48,6 +49,8 @@ class Failure(Exception):
 #
 # User interface
 #
+
+VERBOSE = False
 
 _to_be_continued = False
 def _check_tbc():
@@ -63,23 +66,29 @@ def info(message):
 
 
 def info_begin(message):
-    global _to_be_continued
+    if not VERBOSE:
+        return
     _check_tbc()
     sys.stdout.write(message)
     sys.stdout.flush()
+    global _to_be_continued
     _to_be_continued = True
 
 
 def info_continue(message):
-    global _to_be_continued
+    if not VERBOSE:
+        return
     sys.stdout.write(message)
     sys.stdout.flush()
+    global _to_be_continued
     _to_be_continued = True
 
 
 def info_end(message):
-    global _to_be_continued
+    if not VERBOSE:
+        return
     print(message)
+    global _to_be_continued
     _to_be_continued = False
 
 
@@ -118,7 +127,7 @@ class CommandFailed(Failure):
                                command, status, output))
 
 
-def run(command, encoding=None):
+def run(command, encoding=None, decode=True):
     """Run a command [cmd, arg1, arg2, ...].
 
     Returns the output (stdout + stderr).
@@ -132,7 +141,9 @@ def run(command, encoding=None):
                                 stderr=subprocess.STDOUT)
     except OSError as e:
         raise Failure("could not run %s: %s" % (command, e))
-    output = pipe.communicate()[0].decode(encoding)
+    output = pipe.communicate()[0]
+    if decode:
+        output = output.decode(encoding)
     status = pipe.wait()
     if status != 0:
         raise CommandFailed(command, status, output)
@@ -277,7 +288,7 @@ class Mercurial(VCS):
     @staticmethod
     def get_versioned_files():
         """List all files under Mercurial control in the current directory."""
-        output = run(['hg', 'status', '-ncam', '.'])
+        output = run(['hg', 'status', '-ncamd', '.'])
         return add_directories(output.splitlines())
 
 
@@ -294,12 +305,55 @@ class Bazaar(VCS):
 class Subversion(VCS):
     metadata_name = '.svn'
 
-    @staticmethod
-    def get_versioned_files():
+    @classmethod
+    def get_versioned_files(cls):
         """List all files under SVN control in the current directory."""
-        output = run(['svn', 'st', '-vq'])
-        return sorted(line[12:].split(None, 3)[-1]
-                      for line in output.splitlines()[1:])
+        output = run(['svn', 'st', '-vq', '--xml'], decode=False)
+        tree = ET.XML(output)
+        return sorted(entry.get('path') for entry in tree.findall('.//entry')
+                      if cls.is_interesting(entry))
+
+    @staticmethod
+    def is_interesting(entry):
+        """Is this entry interesting?
+
+        ``entry`` is an XML node representing one entry of the svn status
+        XML output.  It looks like this::
+
+            <entry path="unchanged.txt">
+              <wc-status item="normal" revision="1" props="none">
+                <commit revision="1">
+                  <author>mg</author>
+                  <date>2015-02-06T07:52:38.163516Z</date>
+                </commit>
+              </wc-status>
+            </entry>
+
+            <entry path="added-but-not-committed.txt">
+              <wc-status item="added" revision="-1" props="none"></wc-status>
+            </entry>
+
+            <entry path="ext">
+              <wc-status item="external" props="none"></wc-status>
+            </entry>
+
+            <entry path="unknown.txt">
+              <wc-status props="none" item="unversioned"></wc-status>
+            </entry>
+
+        """
+        if entry.get('path') == '.':
+            return False
+        status = entry.find('wc-status')
+        if status is None:
+            warning('svn status --xml parse error: <entry path="%s"> without'
+                    ' <wc-status>' % entry.get('path'))
+            return False
+        # For SVN externals we get two entries: one mentioning the
+        # existence of the external, and one about the status of the external.
+        if status.get('item') in ('unversioned', 'external'):
+            return False
+        return True
 
 
 def detect_vcs():
@@ -356,6 +410,7 @@ IGNORE = [
     'setup.cfg',    # always generated, sometimes also kept in source control
     # it's not a problem if the sdist is lacking these files:
     '.hgtags', '.hgignore', '.gitignore', '.bzrignore',
+    '.travis.yml',
     # it's convenient to ship compiled .mo files in sdists, but they shouldn't
     # be checked in
     '*.mo',
@@ -393,7 +448,7 @@ SUGGESTIONS = [(re.compile(pattern.replace('/', _sep)), suggestion) for pattern,
     ('^([a-zA-Z_][a-zA-Z_0-9]*)/'
      '.*[.](py|zcml|pt|mako|xml|html|txt|rst|css|png|jpg|dot|po|pot|mo|ui|desktop|bat)$',
                                     r'recursive-include \1 *.\2'),
-    ('^([a-zA-Z_][a-zA-Z_0-9]*)/(Makefile)$',
+    ('^([a-zA-Z_][a-zA-Z_0-9]*)(?:/.*)?/(Makefile)$',
                                     r'recursive-include \1 \2'),
     # catch-all rules that actually cover some of the above; somewhat
     # experimental: I fear false positives
@@ -466,6 +521,12 @@ def _get_ignore_from_manifest(contents):
         except ValueError:
             # no whitespace, so not interesting
             continue
+        for part in rest.split():
+            # distutils enforces these warnings on Windows only
+            if part.startswith('/'):
+                warning("ERROR: Leading slashes are not allowed in MANIFEST.in on Windows: %s" % part)
+            if part.endswith('/'):
+                warning("ERROR: Trailing slashes are not allowed in MANIFEST.in on Windows: %s" % part)
         if cmd == 'exclude':
             # An exclude of 'dirname/*css' can match 'dirname/foo.css'
             # but not 'dirname/subdir/bar.css'.  We need a regular
@@ -507,6 +568,9 @@ def _get_ignore_from_manifest(contents):
             # not contain a path separator, as it actually has no
             # effect in that case, but that could differ per python
             # version.  We strip it here to avoid double separators.
+            # XXX: mg: I'm not 100% sure the above is correct, AFAICS
+            # all pythons from 2.6 complain if the path has a leading or
+            # trailing slash -- on Windows, that is.
             rest = rest.rstrip('/\\')
             ignore.append(rest)
             ignore.append(rest + os.path.sep + '*')
@@ -576,6 +640,7 @@ def check_manifest(source_tree='.', create=False, update=False,
     Returns True if the manifest is fine.
     """
     all_ok = True
+    python = os.path.abspath(python)  # in case it was relative
     with cd(source_tree):
         if not is_package():
             raise Failure('This is not a Python project (no setup.py).')
@@ -593,9 +658,14 @@ def check_manifest(source_tree='.', create=False, update=False,
             sdist_files = sorted(normalize_names(strip_sdist_extras(
                 strip_toplevel_name(get_archive_file_list(sdist_filename)))))
             info_continue(": %d files and directories" % len(sdist_files))
+        existing_source_files = list(filter(os.path.exists, all_source_files))
+        missing_source_files = sorted(set(all_source_files) - set(existing_source_files))
+        if missing_source_files:
+            warning("some files listed as being under source control are missing:\n%s"
+                    % format_list(missing_source_files))
         info_begin("copying source files to a temporary directory")
         with mkdtemp('-sources') as tempsourcedir:
-            copy_files(source_files, tempsourcedir)
+            copy_files(existing_source_files, tempsourcedir)
             if os.path.exists('MANIFEST.in') and 'MANIFEST.in' not in source_files:
                 # See https://github.com/mgedmin/check-manifest/issues/7
                 # if do this, we will emit a warning about MANIFEST.in not
@@ -603,6 +673,12 @@ def check_manifest(source_tree='.', create=False, update=False,
                 # gets confused about their new manifest rules being
                 # ignored.
                 copy_files(['MANIFEST.in'], tempsourcedir)
+            if 'setup.py' not in source_files:
+                # See https://github.com/mgedmin/check-manifest/issues/46
+                # if do this, we will emit a warning about setup.py not
+                # being in source control, if we don't do this, the user
+                # gets a scary error
+                copy_files(['setup.py'], tempsourcedir)
             info_begin("building a clean sdist")
             with cd(tempsourcedir):
                 with mkdtemp('-sdist') as tempdir:
@@ -615,14 +691,19 @@ def check_manifest(source_tree='.', create=False, update=False,
         missing_from_manifest = set(source_files) - set(clean_sdist_files)
         missing_from_VCS = set(sdist_files + clean_sdist_files) - set(source_files)
         if not missing_from_manifest and not missing_from_VCS:
-            info("files in version control match files in the sdist(s)")
+            info("lists of files in version control and sdist match")
         else:
-            error("files in version control do not match the sdist!\n%s"
+            error("lists of files in version control and sdist do not match!\n%s"
                   % format_missing(missing_from_VCS, missing_from_manifest,
                                    "VCS", "sdist"))
             suggestions, unknowns = find_suggestions(missing_from_manifest)
             user_asked_for_help = update or (create and not
                                                 os.path.exists('MANIFEST.in'))
+            if 'MANIFEST.in' not in existing_source_files:
+                if suggestions and not user_asked_for_help:
+                    info("no MANIFEST.in found; you can run 'check-manifest -c' to create one")
+                else:
+                    info("no MANIFEST.in found")
             if suggestions:
                 info("suggested MANIFEST.in rules:\n%s"
                      % format_list(suggestions))
@@ -666,6 +747,8 @@ def main():
         help='location for the source tree')
     parser.add_argument('--version', action='version',
                         version='%(prog)s version ' + __version__)
+    parser.add_argument('-v', '--verbose', action='store_true',
+        help='more verbose output')
     parser.add_argument('-c', '--create', action='store_true',
         help='create a MANIFEST.in if missing')
     parser.add_argument('-u', '--update', action='store_true',
@@ -679,6 +762,10 @@ def main():
 
     if args.ignore:
         IGNORE.extend(args.ignore.split(','))
+
+    if args.verbose:
+        global VERBOSE
+        VERBOSE = True
 
     try:
         if not check_manifest(args.source_tree, create=args.create,

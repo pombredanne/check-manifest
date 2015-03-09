@@ -2,8 +2,58 @@ Changelog
 =========
 
 
-0.21 (unreleased)
+0.24 (unreleased)
 -----------------
+
+* Make sure ``setup.py`` not being added to the VCS doesn't cause
+  hard-to-understand errors (`issue #46
+  <https://github.com/mgedmin/check-manifest/issues/46>`__).
+
+
+0.23 (2015-02-12)
+-----------------
+
+* More reliable svn status parsing; now handles svn externals (`issue #45
+  <https://github.com/mgedmin/check-manifest/issues/45>`__).
+
+* The test suite now skips tests for version control systems that aren't
+  installed (`issue #42
+  <https://github.com/mgedmin/check-manifest/issues/42>`__).
+
+
+0.22 (2014-12-23)
+-----------------
+
+* More terse output by default; use the new ``-v`` (``--verbose``) flag
+  to see all the details.
+
+* Warn the user if MANIFEST.in is missing  (`issue #31
+  <https://github.com/mgedmin/check-manifest/issues/31>`__).
+
+* Fix IOError when files listed under version control are missing (`issue #32
+  <https://github.com/mgedmin/check-manifest/issues/32>`__).
+
+* Improved wording of the match/do not match messages (`issue #34
+  <https://github.com/mgedmin/check-manifest/issues/34>`__).
+
+* Handle a relative --python path (`issue #36
+  <https://github.com/mgedmin/check-manifest/issues/36>`__).
+
+* Warn about leading and trailing slashes in MANIFEST.in (`issue #37
+  <https://github.com/mgedmin/check-manifest/issues/37>`__).
+
+* Ignore .travis.yml by default (`issue #39
+  <https://github.com/mgedmin/check-manifest/issues/39>`__).
+
+* Suggest a rule for Makefile found deeper in the source tree.
+
+
+0.21 (2014-06-13)
+-----------------
+
+* Don't drop setup.cfg when copying version-controlled files into a clean
+  temporary directory (`issue #29
+  <https://github.com/mgedmin/check-manifest/issues/29>`__).
 
 
 0.20 (2014-05-14)

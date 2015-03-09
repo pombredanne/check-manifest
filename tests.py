@@ -10,6 +10,7 @@ import textwrap
 import zipfile
 from contextlib import closing
 from io import BytesIO
+from xml.etree import cElementTree as ET
 
 try:
     import unittest2 as unittest    # Python 2.6
@@ -22,6 +23,9 @@ except ImportError:
     from io import StringIO         # Python 3.x
 
 import mock
+
+
+CAN_SKIP_TESTS = os.getenv('SKIP_NO_TESTS', '') == ''
 
 
 def rmtree(path):
@@ -246,6 +250,7 @@ class Tests(unittest.TestCase):
         from check_manifest import strip_sdist_extras
         filelist = list(map(os.path.normpath, [
             '.gitignore',
+            '.travis.yml',
             'setup.py',
             'setup.cfg',
             'README.txt',
@@ -370,11 +375,13 @@ class Tests(unittest.TestCase):
             'docs/image.png',
             'docs/Makefile',
             'docs/unknown-file',
+            'src/etc/blah/blah/Makefile',
         ]))
         expected_rules = [
             'recursive-include docs *.png',
             'recursive-include docs *.rst',
             'recursive-include docs Makefile',
+            'recursive-include src Makefile',
         ]
         expected_unknowns = [os.path.normpath('docs/unknown-file')]
         self.assertEqual(find_suggestions(filelist),
@@ -457,6 +464,9 @@ class Tests(unittest.TestCase):
         # not fail over it or end up with double slashes.
         self.assertEqual(parse('prune dir/'),
                          (['dir', j('dir', '*')], []))
+        # You should also not have a leading slash
+        self.assertEqual(parse('prune /dir'),
+                         (['/dir', j('/dir', '*')], []))
         # And a mongo test case of everything at the end
         text = textwrap.dedent("""
             #exclude *.01
@@ -594,6 +604,7 @@ class TestMain(unittest.TestCase):
 
     def test(self):
         from check_manifest import main
+        sys.argv.append('-v')
         main()
 
     def test_exit_code_1_on_error(self):
@@ -708,6 +719,18 @@ class TestZestIntegration(unittest.TestCase):
 
 class VCSHelper(object):
 
+    command = None  # override in subclasses
+
+    def is_installed(self):
+        try:
+            p = subprocess.Popen([self.command, '--version'],
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            stdout, stderr = p.communicate()
+            rc = p.wait()
+            return (rc == 0)
+        except OSError:
+            return False
+
     def _run(self, *command):
         # Windows doesn't like Unicode arguments to subprocess.Popen(), on Py2:
         # https://github.com/mgedmin/check-manifest/issues/23#issuecomment-33933031
@@ -726,6 +749,8 @@ class VCSHelper(object):
 class VCSMixin(object):
 
     def setUp(self):
+        if not self.vcs.is_installed() and CAN_SKIP_TESTS:
+            self.skipTest("%s is not installed" % self.vcs.command)
         self.tmpdir = tempfile.mkdtemp(prefix='test-', suffix='-check-manifest')
         self.olddir = os.getcwd()
         os.chdir(self.tmpdir)
@@ -779,6 +804,17 @@ class VCSMixin(object):
                          ['a.txt', 'b', j('b', 'b.txt'), j('b', 'c'),
                           j('b', 'c', 'd.txt')])
 
+    def test_get_vcs_files_deleted_but_not_removed(self):
+        if self.vcs.command == 'bzr':
+            self.skipTest("this cosmetic feature is not supported with bzr")
+            # see the longer explanation in test_missing_source_files
+        from check_manifest import get_vcs_files
+        self._init_vcs()
+        self._create_and_add_to_vcs(['a.txt'])
+        self._commit()
+        os.unlink('a.txt')
+        self.assertEqual(get_vcs_files(), ['a.txt'])
+
     def test_get_vcs_files_in_a_subdir(self):
         from check_manifest import get_vcs_files
         self._init_vcs()
@@ -802,6 +838,8 @@ class VCSMixin(object):
 
 class GitHelper(VCSHelper):
 
+    command = 'git'
+
     def _init_vcs(self):
         self._run('git', 'init')
         self._run('git', 'config', 'user.name', 'Unit Test')
@@ -820,6 +858,8 @@ class TestGit(VCSMixin, unittest.TestCase):
 
 class BzrHelper(VCSHelper):
 
+    command = 'bzr'
+
     def _init_vcs(self):
         self._run('bzr', 'init')
         self._run('bzr', 'whoami', '--branch', 'Unit Test <test@example.com>')
@@ -836,6 +876,8 @@ class TestBzr(VCSMixin, unittest.TestCase):
 
 
 class HgHelper(VCSHelper):
+
+    command = 'hg'
 
     def _init_vcs(self):
         self._run('hg', 'init')
@@ -855,6 +897,8 @@ class TestHg(VCSMixin, unittest.TestCase):
 
 class SvnHelper(VCSHelper):
 
+    command = 'svn'
+
     def _init_vcs(self):
         self._run('svnadmin', 'create', 'repo')
         self._run('svn', 'co', 'file:///' + os.path.abspath('repo').replace(os.path.sep, '/'), 'checkout')
@@ -871,48 +915,119 @@ class SvnHelper(VCSHelper):
 class TestSvn(VCSMixin, unittest.TestCase):
     vcs = SvnHelper()
 
+    def test_svn_externals(self):
+        from check_manifest import get_vcs_files
+        self.vcs._run('svnadmin', 'create', 'repo2')
+        repo2_url = 'file:///' + os.path.abspath('repo2').replace(os.path.sep, '/')
+        self.vcs._init_vcs()
+        self.vcs._run('svn', 'propset', 'svn:externals', 'ext %s' % repo2_url, '.')
+        self.vcs._run('svn', 'up')
+        self._create_files(['a.txt', 'ext/b.txt'])
+        self.vcs._run('svn', 'add', 'a.txt', 'ext/b.txt')
+        j = os.path.join
+        self.assertEqual(get_vcs_files(),
+                         ['a.txt', 'ext', j('ext', 'b.txt')])
 
-class TestUserInterface(unittest.TestCase):
+
+class UIMixin(object):
 
     def setUp(self):
+        import check_manifest
+        self.old_VERBOSE = check_manifest.VERBOSE
         self.real_stdout = sys.stdout
         self.real_stderr = sys.stderr
         sys.stdout = StringIO()
         sys.stderr = StringIO()
 
     def tearDown(self):
+        import check_manifest
         sys.stderr = self.real_stderr
         sys.stdout = self.real_stdout
+        check_manifest.VERBOSE = self.old_VERBOSE
+
+
+class TestSvnExtraErrors(UIMixin, unittest.TestCase):
+
+    def test_svn_xml_parsing_warning(self):
+        from check_manifest import Subversion
+        entry = ET.XML('<entry path="foo/bar.txt"></entry>')
+        self.assertFalse(Subversion.is_interesting(entry))
+        self.assertEqual(
+            sys.stderr.getvalue(),
+            'svn status --xml parse error: <entry path="foo/bar.txt">'
+            ' without <wc-status>\n')
+
+
+class TestUserInterface(UIMixin, unittest.TestCase):
 
     def test_info(self):
-        from check_manifest import info
-        info("Reticulating splines")
+        import check_manifest
+        check_manifest.VERBOSE = False
+        check_manifest.info("Reticulating splines")
+        self.assertEqual(sys.stdout.getvalue(),
+                         "Reticulating splines\n")
+
+    def test_info_verbose(self):
+        import check_manifest
+        check_manifest.VERBOSE = True
+        check_manifest.info("Reticulating splines")
         self.assertEqual(sys.stdout.getvalue(),
                          "Reticulating splines\n")
 
     def test_info_begin_continue_end(self):
-        from check_manifest import info_begin, info_continue, info_end
-        info_begin("Reticulating splines...")
-        info_continue(" nearly done...")
-        info_continue(" almost done...")
-        info_end(" done!")
+        import check_manifest
+        check_manifest.VERBOSE = False
+        check_manifest.info_begin("Reticulating splines...")
+        check_manifest.info_continue(" nearly done...")
+        check_manifest.info_continue(" almost done...")
+        check_manifest.info_end(" done!")
+        self.assertEqual(sys.stdout.getvalue(), "")
+
+    def test_info_begin_continue_end_verbose(self):
+        import check_manifest
+        check_manifest.VERBOSE = True
+        check_manifest.info_begin("Reticulating splines...")
+        check_manifest.info_continue(" nearly done...")
+        check_manifest.info_continue(" almost done...")
+        check_manifest.info_end(" done!")
         self.assertEqual(
             sys.stdout.getvalue(),
             "Reticulating splines... nearly done... almost done... done!\n")
 
     def test_info_emits_newline_when_needed(self):
-        from check_manifest import info_begin, info
-        info_begin("Computering...")
-        info("Forgot to turn the gas off!")
+        import check_manifest
+        check_manifest.VERBOSE = False
+        check_manifest.info_begin("Computering...")
+        check_manifest.info("Forgot to turn the gas off!")
+        self.assertEqual(
+            sys.stdout.getvalue(),
+            "Forgot to turn the gas off!\n")
+
+    def test_info_emits_newline_when_needed_verbose(self):
+        import check_manifest
+        check_manifest.VERBOSE = True
+        check_manifest.info_begin("Computering...")
+        check_manifest.info("Forgot to turn the gas off!")
         self.assertEqual(
             sys.stdout.getvalue(),
             "Computering...\n"
             "Forgot to turn the gas off!\n")
 
     def test_warning(self):
-        from check_manifest import info_begin, warning
-        info_begin("Computering...")
-        warning("Forgot to turn the gas off!")
+        import check_manifest
+        check_manifest.VERBOSE = False
+        check_manifest.info_begin("Computering...")
+        check_manifest.warning("Forgot to turn the gas off!")
+        self.assertEqual(sys.stdout.getvalue(), "")
+        self.assertEqual(
+            sys.stderr.getvalue(),
+            "Forgot to turn the gas off!\n")
+
+    def test_warning_verbose(self):
+        import check_manifest
+        check_manifest.VERBOSE = True
+        check_manifest.info_begin("Computering...")
+        check_manifest.warning("Forgot to turn the gas off!")
         self.assertEqual(
             sys.stdout.getvalue(),
             "Computering...\n")
@@ -921,9 +1036,20 @@ class TestUserInterface(unittest.TestCase):
             "Forgot to turn the gas off!\n")
 
     def test_error(self):
-        from check_manifest import info_begin, error
-        info_begin("Computering...")
-        error("Forgot to turn the gas off!")
+        import check_manifest
+        check_manifest.VERBOSE = False
+        check_manifest.info_begin("Computering...")
+        check_manifest.error("Forgot to turn the gas off!")
+        self.assertEqual(sys.stdout.getvalue(), "")
+        self.assertEqual(
+            sys.stderr.getvalue(),
+            "Forgot to turn the gas off!\n")
+
+    def test_error_verbose(self):
+        import check_manifest
+        check_manifest.VERBOSE = True
+        check_manifest.info_begin("Computering...")
+        check_manifest.error("Forgot to turn the gas off!")
         self.assertEqual(
             sys.stdout.getvalue(),
             "Computering...\n")
@@ -932,11 +1058,29 @@ class TestUserInterface(unittest.TestCase):
             "Forgot to turn the gas off!\n")
 
 
+def pick_installed_vcs():
+    preferred_order = [GitHelper, HgHelper, BzrHelper, SvnHelper]
+    force = os.getenv('FORCE_TEST_VCS')
+    if force:
+        for cls in preferred_order:
+            if force == cls.command:
+                return cls()
+        raise ValueError('Unsupported FORCE_TEST_VCS=%s (supported: %s)'
+                         % (force, '/'.join(cls.command for cls in preferred_order)))
+    for cls in preferred_order:
+        vcs = cls()
+        if vcs.is_installed():
+            return vcs
+    return None
+
+
 class TestCheckManifest(unittest.TestCase):
 
-    _vcs = GitHelper()
+    _vcs = pick_installed_vcs()
 
     def setUp(self):
+        if self._vcs is None:
+            self.fail('at least one version control system should be installed')
         self.oldpwd = os.getcwd()
         self.tmpdir = tempfile.mkdtemp(prefix='test-', suffix='-check-manifest')
         os.chdir(self.tmpdir)
@@ -951,14 +1095,25 @@ class TestCheckManifest(unittest.TestCase):
         os.chdir(self.oldpwd)
         rmtree(self.tmpdir)
 
-    def _create_repo_with_code(self):
+    def _create_repo_with_code(self, add_to_vcs=True):
         self._vcs._init_vcs()
         with open('setup.py', 'w') as f:
             f.write("from setuptools import setup\n")
             f.write("setup(name='sample', py_modules=['sample'])\n")
         with open('sample.py', 'w') as f:
             f.write("# wow. such code. so amaze\n")
-        self._vcs._add_to_vcs(['setup.py', 'sample.py'])
+        if add_to_vcs:
+            self._vcs._add_to_vcs(['setup.py', 'sample.py'])
+
+    def _create_repo_with_code_in_subdir(self):
+        os.mkdir('subdir')
+        os.chdir('subdir')
+        self._create_repo_with_code()
+        # NB: when self._vcs is SvnHelper, we're actually in
+        # ./subdir/checout rather than in ./subdir
+        subdir = os.path.basename(os.getcwd())
+        os.chdir(os.pardir)
+        return subdir
 
     def _add_to_vcs(self, filename, content=''):
         if os.path.sep in filename and not os.path.isdir(os.path.dirname(filename)):
@@ -981,11 +1136,14 @@ class TestCheckManifest(unittest.TestCase):
 
     def test_relative_pathname(self):
         from check_manifest import check_manifest
-        os.mkdir('subdir')
-        os.chdir('subdir')
-        self._create_repo_with_code()
-        os.chdir(os.pardir)
-        self.assertTrue(check_manifest('subdir'))
+        subdir = self._create_repo_with_code_in_subdir()
+        self.assertTrue(check_manifest(subdir))
+
+    def test_relative_python(self):
+        from check_manifest import check_manifest
+        subdir = self._create_repo_with_code_in_subdir()
+        python = os.path.relpath(sys.executable)
+        self.assertTrue(check_manifest(subdir, python=python))
 
     def test_suggestions(self):
         from check_manifest import check_manifest
@@ -1063,6 +1221,14 @@ class TestCheckManifest(unittest.TestCase):
         self.assertIn("missing from VCS:\n  MANIFEST.in", sys.stderr.getvalue())
         self.assertNotIn("missing from sdist", sys.stderr.getvalue())
 
+    def test_setup_py_does_not_need_to_be_added_to_be_considered(self):
+        from check_manifest import check_manifest
+        self._create_repo_with_code(add_to_vcs=False)
+        self._add_to_vcs('sample.py')
+        self.assertFalse(check_manifest())
+        self.assertIn("missing from VCS:\n  setup.py", sys.stderr.getvalue())
+        self.assertNotIn("missing from sdist", sys.stderr.getvalue())
+
     def test_bad_ideas(self):
         from check_manifest import check_manifest
         self._create_repo_with_code()
@@ -1073,6 +1239,25 @@ class TestCheckManifest(unittest.TestCase):
                       sys.stderr.getvalue())
         self.assertIn("this also applies to the following:\n  moo.mo",
                       sys.stderr.getvalue())
+
+    def test_missing_source_files(self):
+        # https://github.com/mgedmin/check-manifest/issues/32
+        from check_manifest import check_manifest
+        self._create_repo_with_code()
+        self._add_to_vcs('missing.py')
+        os.unlink('missing.py')
+        check_manifest()
+        if self._vcs.command != 'bzr':
+            # 'bzr ls' doesn't list files that were deleted but not
+            # marked for deletion.  'bzr st' does, but it doesn't list
+            # unmodified files.  Importing bzrlib and using the API to
+            # get the file list we need is (a) complicated, (b) opens
+            # the optional dependency can of worms, and (c) not viable
+            # under Python 3 unless we fork off a Python 2 subprocess.
+            # Manually combining 'bzr ls' and 'bzr st' outputs just to
+            # produce a cosmetic warning message seems like overkill.
+            self.assertIn("some files listed as being under source control are missing:\n  missing.py",
+                        sys.stderr.getvalue())
 
 
 def test_suite():

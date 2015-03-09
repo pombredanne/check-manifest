@@ -19,10 +19,10 @@ Quick start
 
 You can ask the script to help you update your MANIFEST.in::
 
-    $ check-manifest -u
+    $ check-manifest -u -v
     listing source files under version control: 6 files and directories
     building an sdist: check-manifest-0.7.tar.gz: 4 files and directories
-    files in version control do not match the sdist!
+    lists of files in version control and sdist do not match!
     missing from sdist:
       tests.py
       tox.ini
@@ -45,7 +45,7 @@ Command-line reference
 ::
 
     $ check-manifest --help
-    usage: check-manifest [-h] [--version] [-c] [-u] [-p PYTHON]
+    usage: check-manifest [-h] [--version] [-v] [-c] [-u] [-p PYTHON]
                           [--ignore patterns]
                           [source_tree]
 
@@ -57,6 +57,7 @@ Command-line reference
     optional arguments:
       -h, --help            show this help message and exit
       --version             show program's version number and exit
+      -v, --verbose         more verbose output (default: False)
       -c, --create          create a MANIFEST.in if missing (default: False)
       -u, --update          append suggestions to MANIFEST.in (implies --create)
                             (default: False)
@@ -100,9 +101,9 @@ ignore-default-rules
     ignore list instead of adding to it.
 
 
-.. |buildstatus| image:: https://api.travis-ci.org/mgedmin/check-manifest.png?branch=master
+.. |buildstatus| image:: https://api.travis-ci.org/mgedmin/check-manifest.svg?branch=master
 .. _buildstatus: https://travis-ci.org/mgedmin/check-manifest
 
-.. |coverage| image:: https://coveralls.io/repos/mgedmin/check-manifest/badge.png?branch=master
+.. |coverage| image:: https://coveralls.io/repos/mgedmin/check-manifest/badge.svg?branch=master
 .. _coverage: https://coveralls.io/r/mgedmin/check-manifest
 
