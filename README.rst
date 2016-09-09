@@ -1,7 +1,7 @@
 check-manifest
 ==============
 
-|buildstatus|_ |coverage|_
+|buildstatus|_ |appveyor|_ |coverage|_
 
 Are you a Python developer?  Have you uploaded packages to the Python Package
 Index?  Have you accidentally uploaded *broken* packages with some files
@@ -66,6 +66,9 @@ Command-line reference
                             (default: /home/mg/.venv/bin/python)
       --ignore patterns     ignore files/directories matching these comma-
                             separated patterns (default: None)
+      --ignore-bad-ideas patterns
+                            ignore bad idea files/directories matching these
+                            comma-separated patterns (default: [])
 
 
 Configuration
@@ -100,9 +103,18 @@ ignore-default-rules
     If set to ``true``, your ``ignore`` patterns will replace the default
     ignore list instead of adding to it.
 
+ignore-bad-ideas
+    A list of newline separated filename patterns that will be ignored by
+    check-manifest's generated files check.  Use this if you want to keep
+    generated files in your version control system, even though it is generally
+    a bad idea.
+
 
 .. |buildstatus| image:: https://api.travis-ci.org/mgedmin/check-manifest.svg?branch=master
 .. _buildstatus: https://travis-ci.org/mgedmin/check-manifest
+
+.. |appveyor| image:: https://ci.appveyor.com/api/projects/status/github/mgedmin/check-manifest?branch=master&svg=true
+.. _appveyor: https://ci.appveyor.com/project/mgedmin/check-manifest
 
 .. |coverage| image:: https://coveralls.io/repos/mgedmin/check-manifest/badge.svg?branch=master
 .. _coverage: https://coveralls.io/r/mgedmin/check-manifest

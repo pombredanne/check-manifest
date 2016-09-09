@@ -62,6 +62,10 @@ class Tests(unittest.TestCase):
         self.addCleanup(rmtree, tmpdir)
         return tmpdir
 
+    def create_file(self, filename, contents):
+        with open(filename, 'w') as f:
+            f.write(contents)
+
     def create_zip_file(self, filename, filenames):
         with closing(zipfile.ZipFile(filename, 'w')) as zf:
             for fn in filenames:
@@ -212,11 +216,12 @@ class Tests(unittest.TestCase):
     def test_detect_vcs_no_vcs(self):
         from check_manifest import detect_vcs, Failure
         with mock.patch('check_manifest.VCS.detect', staticmethod(lambda *a: False)):
-            with self.assertRaises(Failure) as cm:
-                detect_vcs()
-            self.assertEqual(str(cm.exception),
-                             "Couldn't find version control data"
-                             " (git/hg/bzr/svn supported)")
+            with mock.patch('check_manifest.Git.detect', staticmethod(lambda *a: False)):
+                with self.assertRaises(Failure) as cm:
+                    detect_vcs()
+                self.assertEqual(str(cm.exception),
+                                 "Couldn't find version control data"
+                                 " (git/hg/bzr/svn supported)")
 
     def test_normalize_names(self):
         from check_manifest import normalize_names
@@ -255,6 +260,7 @@ class Tests(unittest.TestCase):
             'setup.cfg',
             'README.txt',
             'src',
+            'src/.gitignore',
             'src/zope',
             'src/zope/__init__.py',
             'src/zope/foo',
@@ -279,7 +285,7 @@ class Tests(unittest.TestCase):
     def test_strip_sdist_extras_with_manifest(self):
         import check_manifest
         from check_manifest import strip_sdist_extras
-        from check_manifest import _get_ignore_from_manifest as parse
+        from check_manifest import _get_ignore_from_manifest_lines as parse
         orig_ignore = check_manifest.IGNORE[:]
         orig_ignore_regexps = check_manifest.IGNORE_REGEXPS[:]
         manifest_in = textwrap.dedent("""
@@ -328,7 +334,7 @@ class Tests(unittest.TestCase):
         # This will change the definitions.
         try:
             # This is normally done in read_manifest:
-            ignore, ignore_regexps = parse(manifest_in)
+            ignore, ignore_regexps = parse(manifest_in.splitlines())
             check_manifest.IGNORE.extend(ignore)
             check_manifest.IGNORE_REGEXPS.extend(ignore_regexps)
             # Filter the file list.
@@ -421,55 +427,52 @@ class Tests(unittest.TestCase):
         self.assertEqual(g2r('foo[!123].py'), r'foo[^123]\.py\Z(?ms)')
         self.assertEqual(g2r('foo/*.py'), r'foo\/[^%s]*\.py\Z(?ms)' % sep)
 
-    def test_get_ignore_from_manifest(self):
-        from check_manifest import _get_ignore_from_manifest as parse
+    def test_get_ignore_from_manifest_lines(self):
+        from check_manifest import _get_ignore_from_manifest_lines as parse
         from check_manifest import _glob_to_regexp as g2r
         j = os.path.join
         # The return value is a tuple with two lists:
         # ([<list of filename ignores>], [<list of regular expressions>])
-        self.assertEqual(parse(''),
+        self.assertEqual(parse([]),
                          ([], []))
-        self.assertEqual(parse('      \n        '),
+        self.assertEqual(parse(['', ' ']),
                          ([], []))
-        self.assertEqual(parse('exclude *.cfg'),
+        self.assertEqual(parse(['exclude *.cfg']),
                          ([], [g2r('*.cfg')]))
-        self.assertEqual(parse('#exclude *.cfg'),
-                         ([], []))
-        self.assertEqual(parse('exclude          *.cfg'),
+        self.assertEqual(parse(['exclude          *.cfg']),
                          ([], [g2r('*.cfg')]))
-        self.assertEqual(parse('\texclude\t*.cfg foo.*   bar.txt'),
+        self.assertEqual(parse(['\texclude\t*.cfg foo.*   bar.txt']),
                          (['bar.txt'], [g2r('*.cfg'), g2r('foo.*')]))
-        self.assertEqual(parse('exclude some/directory/*.cfg'),
+        self.assertEqual(parse(['exclude some/directory/*.cfg']),
                          ([], [g2r('some/directory/*.cfg')]))
-        self.assertEqual(parse('include *.cfg'),
+        self.assertEqual(parse(['include *.cfg']),
                          ([], []))
-        self.assertEqual(parse('global-exclude *.pyc'),
+        self.assertEqual(parse(['global-exclude *.pyc']),
                          (['*.pyc'], []))
-        self.assertEqual(parse('global-exclude *.pyc *.sh'),
+        self.assertEqual(parse(['global-exclude *.pyc *.sh']),
                          (['*.pyc', '*.sh'], []))
-        self.assertEqual(parse('recursive-exclude dir *.pyc'),
+        self.assertEqual(parse(['recursive-exclude dir *.pyc']),
                          ([j('dir', '*.pyc')], []))
-        self.assertEqual(parse('recursive-exclude dir *.pyc foo*.sh'),
+        self.assertEqual(parse(['recursive-exclude dir *.pyc foo*.sh']),
                          ([j('dir', '*.pyc'), j('dir', 'foo*.sh'),
                            j('dir', '*', 'foo*.sh')], []))
-        self.assertEqual(parse('recursive-exclude dir nopattern.xml'),
+        self.assertEqual(parse(['recursive-exclude dir nopattern.xml']),
                          ([j('dir', 'nopattern.xml'),
                            j('dir', '*', 'nopattern.xml')], []))
         # We should not fail when a recursive-exclude line is wrong:
-        self.assertEqual(parse('recursive-exclude dirwithoutpattern'),
+        self.assertEqual(parse(['recursive-exclude dirwithoutpattern']),
                          ([], []))
-        self.assertEqual(parse('prune dir'),
+        self.assertEqual(parse(['prune dir']),
                          (['dir', j('dir', '*')], []))
         # You should not add a slash at the end of a prune, but let's
         # not fail over it or end up with double slashes.
-        self.assertEqual(parse('prune dir/'),
+        self.assertEqual(parse(['prune dir/']),
                          (['dir', j('dir', '*')], []))
         # You should also not have a leading slash
-        self.assertEqual(parse('prune /dir'),
+        self.assertEqual(parse(['prune /dir']),
                          (['/dir', j('/dir', '*')], []))
         # And a mongo test case of everything at the end
         text = textwrap.dedent("""
-            #exclude *.01
             exclude *.02
             exclude *.03 04.*   bar.txt
             exclude          *.05
@@ -480,7 +483,7 @@ class Tests(unittest.TestCase):
             prune 30
             recursive-exclude    40      *.41
             recursive-exclude 42 *.43 44.*
-        """)
+        """).splitlines()
         self.assertEqual(
             parse(text),
             ([
@@ -502,6 +505,32 @@ class Tests(unittest.TestCase):
                 g2r('some/directory/*.cfg'),
             ]))
 
+    def test_get_ignore_from_manifest(self):
+        from check_manifest import _get_ignore_from_manifest as parse
+        filename = os.path.join(self.make_temp_dir(), 'MANIFEST.in')
+        self.create_file(filename, textwrap.dedent('''
+           exclude \\
+              # yes, this is allowed!
+              test.dat
+
+           # https://github.com/mgedmin/check-manifest/issues/66
+           # docs/ folder
+        '''))
+        self.assertEqual(parse(filename), (['test.dat'], []))
+        self.assertEqual(self.warnings, [])
+
+    def test_get_ignore_from_manifest_warnings(self):
+        from check_manifest import _get_ignore_from_manifest as parse
+        filename = os.path.join(self.make_temp_dir(), 'MANIFEST.in')
+        self.create_file(filename, textwrap.dedent('''
+           # this is bad: a file should not end with a backslash
+           exclude test.dat \\
+        '''))
+        self.assertEqual(parse(filename), (['test.dat'], []))
+        self.assertEqual(self.warnings, [
+            "%s, line 2: continuation line immediately precedes end-of-file" % filename,
+        ])
+
 
 class TestConfiguration(unittest.TestCase):
 
@@ -512,13 +541,16 @@ class TestConfiguration(unittest.TestCase):
         os.chdir(self.tmpdir)
         self.OLD_IGNORE = check_manifest.IGNORE
         self.OLD_IGNORE_REGEXPS = check_manifest.IGNORE_REGEXPS
+        self.OLD_IGNORE_BAD_IDEAS = check_manifest.IGNORE_BAD_IDEAS
         check_manifest.IGNORE = ['default-ignore-rules']
         check_manifest.IGNORE_REGEXPS = ['default-ignore-regexps']
+        check_manifest.IGNORE_BAD_IDEAS = []
 
     def tearDown(self):
         import check_manifest
         check_manifest.IGNORE = self.OLD_IGNORE
         check_manifest.IGNORE_REGEXPS = self.OLD_IGNORE_REGEXPS
+        check_manifest.IGNORE_BAD_IDEAS = self.OLD_IGNORE_BAD_IDEAS
         os.chdir(self.oldpwd)
         shutil.rmtree(self.tmpdir)
 
@@ -558,6 +590,16 @@ class TestConfiguration(unittest.TestCase):
         self.assertEqual(check_manifest.IGNORE,
                          ['foo', 'bar'])
 
+    def test_read_config_ignore_bad_ideas(self):
+        import check_manifest
+        with open('setup.cfg', 'w') as f:
+            f.write('[check-manifest]\n'
+                    'ignore-bad-ideas = \n'
+                    '  foo\n'
+                    '  bar\n')
+        check_manifest.read_config()
+        self.assertEqual(check_manifest.IGNORE_BAD_IDEAS, ['foo', 'bar'])
+
     def test_read_manifest_no_manifest(self):
         import check_manifest
         check_manifest.read_manifest()
@@ -590,13 +632,16 @@ class TestMain(unittest.TestCase):
         sys.argv = ['check-manifest']
         self.OLD_IGNORE = check_manifest.IGNORE
         self.OLD_IGNORE_REGEXPS = check_manifest.IGNORE_REGEXPS
+        self.OLD_IGNORE_BAD_IDEAS = check_manifest.IGNORE_BAD_IDEAS
         check_manifest.IGNORE = ['default-ignore-rules']
         check_manifest.IGNORE_REGEXPS = ['default-ignore-regexps']
+        check_manifest.IGNORE_BAD_IDEAS = []
 
     def tearDown(self):
         import check_manifest
         check_manifest.IGNORE = self.OLD_IGNORE
         check_manifest.IGNORE_REGEXPS = self.OLD_IGNORE_REGEXPS
+        check_manifest.IGNORE_BAD_IDEAS = self.OLD_IGNORE_BAD_IDEAS
         sys.argv = self._orig_sys_argv
         self._se_patcher.stop()
         self._cm_patcher.stop()
@@ -626,6 +671,13 @@ class TestMain(unittest.TestCase):
         check_manifest.main()
         self.assertEqual(check_manifest.IGNORE,
                          ['default-ignore-rules', 'x', 'y', 'z'])
+
+    def test_ignore_bad_ideas_args(self):
+        import check_manifest
+        sys.argv.append('--ignore-bad-ideas=x,y,z')
+        check_manifest.main()
+        self.assertEqual(check_manifest.IGNORE_BAD_IDEAS,
+                         ['x', 'y', 'z'])
 
 
 class TestZestIntegration(unittest.TestCase):
@@ -743,7 +795,11 @@ class VCSHelper(object):
         if rc:
             print(' '.join(command))
             print(stdout)
-            raise subprocess.CalledProcessError(rc, command[0], output=stdout)
+            try:
+                raise subprocess.CalledProcessError(rc, command[0], output=stdout)
+            except TypeError:
+                # BBB Python 2.6
+                raise subprocess.CalledProcessError(rc, command[0])
 
 
 class VCSMixin(object):
@@ -846,7 +902,10 @@ class GitHelper(VCSHelper):
         self._run('git', 'config', 'user.email', 'test@example.com')
 
     def _add_to_vcs(self, filenames):
-        self._run('git', 'add', '--', *filenames)
+        # Note that we use --force to prevent errors when we want to
+        # add foo.egg-info and the user running the tests has
+        # '*.egg-info' in her global .gitignore file.
+        self._run('git', 'add', '--force', '--', *filenames)
 
     def _commit(self):
         self._run('git', 'commit', '-m', 'Initial')
@@ -854,6 +913,59 @@ class GitHelper(VCSHelper):
 
 class TestGit(VCSMixin, unittest.TestCase):
     vcs = GitHelper()
+
+    def _init_repo_with_files(self, dirname, filenames):
+        os.mkdir(dirname)
+        os.chdir(dirname)
+        self._init_vcs()
+        self._create_and_add_to_vcs(filenames)
+        self._commit()
+        os.chdir(self.tmpdir)
+
+    def _add_submodule(self, repo, subdir, subrepo):
+        os.chdir(repo)
+        self.vcs._run('git', 'submodule', 'add', subrepo, subdir)
+        self._commit()
+        os.chdir(self.tmpdir)
+
+    def test_detect_git_submodule(self):
+        from check_manifest import detect_vcs, Failure
+        with self.assertRaises(Failure) as cm:
+            detect_vcs()
+        self.assertEqual(str(cm.exception),
+                         "Couldn't find version control data"
+                         " (git/hg/bzr/svn supported)")
+        # now create a .git file like in a submodule
+        open(os.path.join(self.tmpdir, '.git'), 'w').close()
+        self.assertEqual(detect_vcs().metadata_name, '.git')
+
+    def test_get_versioned_files_with_git_submodules(self):
+        from check_manifest import get_vcs_files
+        self._init_repo_with_files('repo1', ['file1', 'file2'])
+        self._init_repo_with_files('repo2', ['file3'])
+        self._init_repo_with_files('repo3', ['file4'])
+        self._add_submodule('repo2', 'sub3', '../repo3')
+        self._init_repo_with_files('main', ['file5', 'subdir/file6'])
+        self._add_submodule('main', 'sub1', '../repo1')
+        self._add_submodule('main', 'subdir/sub2', '../repo2')
+        os.chdir('main')
+        self.vcs._run('git', 'submodule', 'update', '--init', '--recursive')
+        self.assertEqual(
+            get_vcs_files(),
+            [fn.replace('/', os.path.sep) for fn in [
+                '.gitmodules',
+                'file5',
+                'sub1',
+                'sub1/file1',
+                'sub1/file2',
+                'subdir',
+                'subdir/file6',
+                'subdir/sub2',
+                'subdir/sub2/.gitmodules',
+                'subdir/sub2/file3',
+                'subdir/sub2/sub3',
+                'subdir/sub2/sub3/file4',
+            ]])
 
 
 class BzrHelper(VCSHelper):
@@ -893,6 +1005,34 @@ class HgHelper(VCSHelper):
 
 class TestHg(VCSMixin, unittest.TestCase):
     vcs = HgHelper()
+
+    @mock.patch('sys.stdin')
+    @mock.patch('sys.stdout')
+    def test_terminal_encoding_not_known(self, mock_stdout, mock_stdin):
+        from check_manifest import Bazaar
+        mock_stdout.encoding = None
+        mock_stdin.encoding = None
+        self.assertEqual(Bazaar._get_terminal_encoding(), None)
+
+    @mock.patch('sys.stdout')
+    def test_terminal_encoding_stdout_known(self, mock_stdout):
+        from check_manifest import Bazaar
+        mock_stdout.encoding = 'UTF-8'
+        self.assertEqual(Bazaar._get_terminal_encoding(), 'UTF-8')
+
+    @mock.patch('sys.stdin')
+    @mock.patch('sys.stdout')
+    def test_terminal_encoding_stdin_known(self, mock_stdout, mock_stdin):
+        from check_manifest import Bazaar
+        mock_stdout.encoding = None
+        mock_stdin.encoding = 'UTF-8'
+        self.assertEqual(Bazaar._get_terminal_encoding(), 'UTF-8')
+
+    @mock.patch('sys.stdout')
+    def test_terminal_encoding_cp0(self, mock_stdout):
+        from check_manifest import Bazaar
+        mock_stdout.encoding = 'cp0'
+        self.assertEqual(Bazaar._get_terminal_encoding(), None)
 
 
 class SvnHelper(VCSHelper):
@@ -1110,7 +1250,7 @@ class TestCheckManifest(unittest.TestCase):
         os.chdir('subdir')
         self._create_repo_with_code()
         # NB: when self._vcs is SvnHelper, we're actually in
-        # ./subdir/checout rather than in ./subdir
+        # ./subdir/checkout rather than in ./subdir
         subdir = os.path.basename(os.getcwd())
         os.chdir(os.pardir)
         return subdir
@@ -1140,10 +1280,19 @@ class TestCheckManifest(unittest.TestCase):
         self.assertTrue(check_manifest(subdir))
 
     def test_relative_python(self):
+        # https://github.com/mgedmin/check-manifest/issues/36
         from check_manifest import check_manifest
         subdir = self._create_repo_with_code_in_subdir()
         python = os.path.relpath(sys.executable)
         self.assertTrue(check_manifest(subdir, python=python))
+
+    def test_python_from_path(self):
+        # https://github.com/mgedmin/check-manifest/issues/57
+        # NB: this test assumes you have a 'python' executable somewhere
+        # in your path.
+        from check_manifest import check_manifest
+        subdir = self._create_repo_with_code_in_subdir()
+        self.assertTrue(check_manifest(subdir, python='python'))
 
     def test_suggestions(self):
         from check_manifest import check_manifest
@@ -1239,6 +1388,25 @@ class TestCheckManifest(unittest.TestCase):
                       sys.stderr.getvalue())
         self.assertIn("this also applies to the following:\n  moo.mo",
                       sys.stderr.getvalue())
+
+    def test_ignore_bad_ideas(self):
+        from check_manifest import check_manifest
+        self._create_repo_with_code()
+        with open('setup.cfg', 'w') as f:
+            f.write('[check-manifest]\n'
+                    'ignore =\n'
+                    '  subdir/bar.egg-info\n'
+                    'ignore-bad-ideas =\n'
+                    '  *.mo\n'
+                    '  subdir/bar.egg-info\n')
+        self._add_to_vcs('foo.egg-info')
+        self._add_to_vcs('moo.mo')
+        self._add_to_vcs(os.path.join('subdir', 'bar.egg-info'))
+        self.assertFalse(check_manifest())
+        self.assertIn("you have foo.egg-info in source control!",
+                      sys.stderr.getvalue())
+        self.assertNotIn("moo.mo", sys.stderr.getvalue())
+        self.assertNotIn("bar.egg-info", sys.stderr.getvalue())
 
     def test_missing_source_files(self):
         # https://github.com/mgedmin/check-manifest/issues/32

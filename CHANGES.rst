@@ -2,7 +2,104 @@ Changelog
 =========
 
 
-0.24 (unreleased)
+0.34 (unreleased)
+-----------------
+
+- Nothing changed yet.
+
+
+0.33 (2016-08-29)
+-----------------
+
+- Fix WindowsError due to git submodules in subdirectories
+  (`#73 <https://github.com/mgedmin/check-manifest/pull/73>`__).
+  Contributed by Loren Gordon.
+
+
+0.32 (2016-08-16)
+-----------------
+
+* New config/command line option to ignore bad ideas (ignore-bad-ideas)
+  (`issue #67 <https://github.com/mgedmin/check-manifest/issues/67>`__).
+  Contributed by Brecht Machiels.
+
+* Files named ``.hgsigs`` are ignored by default.  Contributed by Jakub Wilk.
+
+
+0.31 (2016-01-28)
+-----------------
+
+- Drop Python 3.2 support.
+
+- Ignore commented-out lines in MANIFEST.in
+  (`issue #66 <https://github.com/mgedmin/check-manifest/issues/66>`__).
+
+
+0.30 (2015-12-10)
+-----------------
+
+* Support git submodules
+  (`issue #61 <https://github.com/mgedmin/check-manifest/issues/61>`__).
+
+* Revert the zc.buildout support hack from 0.26 because it causes breakage
+  (`issue #56 <https://github.com/mgedmin/check-manifest/issues/56>`__).
+
+* Improve non-ASCII filename handling with Bazaar on Windows.
+
+
+0.29 (2015-11-21)
+-----------------
+
+* Fix --python with just a command name, to be found in path (`issue #57
+  <https://github.com/mgedmin/check-manifest/issues/57>`__).
+
+
+0.28 (2015-11-11)
+-----------------
+
+* Fix detection of git repositories when .git is a file and not a directory (`#53
+  <https://github.com/mgedmin/check-manifest/pull/53>`__).  One situation
+  where this occurs is when the project is checked out as a git submodule.
+
+* Apply ignore patterns in subdirectories too (`#54
+  <https://github.com/mgedmin/check-manifest/issues/54>`__).
+
+
+0.27 (2015-11-02)
+-----------------
+
+* Fix utter breakage on Windows, introduced in 0.26 (`issue #52
+  <https://github.com/mgedmin/check-manifest/issues/52>`__).
+  (The bug -- clearing the environment unnecessarily -- could probably
+  also cause locale-related problems on other OSes.)
+
+
+0.26 (2015-10-30)
+-----------------
+
+* Do not complain about missing ``.gitattributes`` file (`PR #50
+  <https://github.com/mgedmin/check-manifest/pull/50>`__).
+
+* Normalize unicode representation and case of filenames. (`issue #47
+  <https://github.com/mgedmin/check-manifest/issues/47>`__).
+
+* Support installation via zc.buildout better (`issue #35
+  <https://github.com/mgedmin/check-manifest/issues/35>`__).
+
+* Drop Python 2.6 support because one of our test dependencies (mock) dropped
+  it.  This also means we no longer use environment markers.
+
+
+0.25 (2015-05-27)
+-----------------
+
+* Stop dynamic computation of install_requires in setup.py: this doesn't work
+  well in the presence of the pip 7 wheel cache.  Use PEP-426 environment
+  markers instead (this means we now require setuptools >= 0.7, and pip >= 6.0,
+  and wheel >= 0.24).
+
+
+0.24 (2015-03-26)
 -----------------
 
 * Make sure ``setup.py`` not being added to the VCS doesn't cause
@@ -207,5 +304,5 @@ Changelog
   MANIFEST.in, and a Makefile.
 
 * Fixed a bug in error reporting (when setup.py failed, the user would get
-  `TypeError: descriptor '__init__' requires a 'exceptions.Exception' object
+  `TypeError: descriptor '__init__' requires an 'exceptions.Exception' object
   but received a 'str'`).

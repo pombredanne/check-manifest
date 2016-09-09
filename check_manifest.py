@@ -19,14 +19,17 @@ import argparse
 import fnmatch
 import locale
 import os
+import posixpath
 import re
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+import unicodedata
 import zipfile
 from contextlib import contextmanager, closing
+from distutils.text_file import TextFile
 from xml.etree import cElementTree as ET
 
 try:
@@ -36,7 +39,7 @@ except ImportError:
     import configparser as ConfigParser
 
 
-__version__ = '0.24.dev0'
+__version__ = '0.34.dev0'
 __author__ = 'Marius Gedminas <marius@gedmin.as>'
 __licence__ = 'MIT'
 __url__ = 'https://github.com/mgedmin/check-manifest'
@@ -127,7 +130,7 @@ class CommandFailed(Failure):
                                command, status, output))
 
 
-def run(command, encoding=None, decode=True):
+def run(command, encoding=None, decode=True, cwd=None):
     """Run a command [cmd, arg1, arg2, ...].
 
     Returns the output (stdout + stderr).
@@ -137,8 +140,10 @@ def run(command, encoding=None, decode=True):
     if not encoding:
         encoding = locale.getpreferredencoding()
     try:
-        pipe = subprocess.Popen(command, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT)
+        with open(os.devnull, 'rb') as devnull:
+            pipe = subprocess.Popen(command, stdin=devnull,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, cwd=cwd)
     except OSError as e:
         raise Failure("could not run %s: %s" % (command, e))
     output = pipe.communicate()[0]
@@ -262,6 +267,17 @@ def strip_toplevel_name(filelist):
     return [name[len(prefix):] for name in names]
 
 
+def add_prefix_to_each(prefix, filelist):
+    """Add a prefix to each name in a file list.
+
+        >>> filelist = add_prefix_to_each('foo/bar', ['a', 'b', 'c/d'])
+        >>> [f.replace(os.path.sep, '/') for f in filelist]
+        ['foo/bar/a', 'foo/bar/b', 'foo/bar/c/d']
+
+    """
+    return [posixpath.join(prefix, name) for name in filelist]
+
+
 class VCS(object):
 
     @classmethod
@@ -272,14 +288,42 @@ class VCS(object):
 class Git(VCS):
     metadata_name = '.git'
 
-    @staticmethod
-    def get_versioned_files():
+    # Git for Windows uses UTF-8 instead of the locale encoding.
+    # Git on POSIX systems uses the locale encoding.
+    _encoding = 'UTF-8' if sys.platform == 'win32' else None
+
+    @classmethod
+    def detect(cls, location):
+        # .git can be a file for submodules
+        return os.path.exists(os.path.join(location, cls.metadata_name))
+
+    @classmethod
+    def get_versioned_files(cls):
         """List all files versioned by git in the current directory."""
-        # Git for Windows uses UTF-8 instead of the locale encoding.
-        # Regular Git on sane POSIX systems uses the locale encoding
-        encoding = 'UTF-8' if sys.platform == 'win32' else None
-        output = run(['git', 'ls-files', '-z'], encoding=encoding)
-        return add_directories(output.split('\0')[:-1])
+        files = cls._git_ls_files()
+        submodules = cls._list_submodules()
+        for subdir in submodules:
+            subdir = os.path.relpath(subdir).replace(os.path.sep, '/')
+            files += add_prefix_to_each(subdir, cls._git_ls_files(subdir))
+        return add_directories(files)
+
+    @classmethod
+    def _git_ls_files(cls, cwd=None):
+        output = run(['git', 'ls-files', '-z'], encoding=cls._encoding, cwd=cwd)
+        return output.rstrip('\0').split('\0')
+
+    @classmethod
+    def _list_submodules(cls):
+        # This is incredibly expensive on my Jenkins instance (50 seconds for
+        # each invocation, even when there are no submodules whatsoever).
+        # Curiously, I cannot reproduce that in Appveyor, or even on the same
+        # Jenkins machine but when I run the tests manually.  Still, 2-hour
+        # Jenkins runs are bad, so let's avoid running 'git submodule' when
+        # there's no .gitmodules file.
+        if not os.path.exists('.gitmodules'):
+            return []
+        return run(['git', 'submodule', '--quiet', 'foreach', '--recursive',
+                    'printf "%s/%s\\n" $toplevel $path'], encoding=cls._encoding).splitlines()
 
 
 class Mercurial(VCS):
@@ -295,10 +339,27 @@ class Mercurial(VCS):
 class Bazaar(VCS):
     metadata_name = '.bzr'
 
-    @staticmethod
-    def get_versioned_files():
+    @classmethod
+    def _get_terminal_encoding(self):
+        # Based on bzrlib.osutils.get_terminal_encoding()
+        encoding = getattr(sys.stdout, 'encoding', None)
+        if not encoding:
+            encoding = getattr(sys.stdin, 'encoding', None)
+        if encoding == 'cp0':  # "no codepage"
+            encoding = None
+        # NB: bzrlib falls back on bzrlib.osutils.get_user_encoding(),
+        # which is like locale.getpreferredencoding() on steroids, and
+        # also includes a fallback from 'ascii' to 'utf-8' when
+        # sys.platform is 'darwin'.  This is probably something we might
+        # want to do in run(), but I'll wait for somebody to complain
+        # first, since I don't have a Mac OS X machine and cannot test.
+        return encoding
+
+    @classmethod
+    def get_versioned_files(cls):
         """List all files versioned in Bazaar in the current directory."""
-        output = run(['bzr', 'ls', '-VR'])
+        encoding = cls._get_terminal_encoding()
+        output = run(['bzr', 'ls', '-VR'], encoding=encoding)
         return output.splitlines()
 
 
@@ -377,11 +438,25 @@ def get_vcs_files():
 
 
 def normalize_names(names):
+    """Normalize file names."""
+    return list(map(normalize_name, names))
+
+
+def normalize_name(name):
     """Some VCS print directory names with trailing slashes.  Strip them.
 
     Easiest is to normalize the path.
+
+    And encodings may trip us up too, especially when comparing lists
+    of files.  Plus maybe lowercase versus uppercase.
     """
-    return [os.path.normpath(name) for name in names]
+    name = os.path.normpath(name)
+    name = unicodify(name)
+    if sys.platform == 'darwin':
+        # Mac OSX may have problems comparing non-ascii filenames, so
+        # we convert them.
+        name = unicodedata.normalize('NFC', name)
+    return name
 
 
 def add_directories(names):
@@ -409,7 +484,8 @@ IGNORE = [
     '*.egg-info/*', # always generated
     'setup.cfg',    # always generated, sometimes also kept in source control
     # it's not a problem if the sdist is lacking these files:
-    '.hgtags', '.hgignore', '.gitignore', '.bzrignore',
+    '.hgtags', '.hgsigs', '.hgignore', '.gitignore', '.bzrignore',
+    '.gitattributes',
     '.travis.yml',
     # it's convenient to ship compiled .mo files in sdists, but they shouldn't
     # be checked in
@@ -435,6 +511,8 @@ WARN_ABOUT_FILES_IN_VCS = [
     '.#*',
 ]
 
+IGNORE_BAD_IDEAS = []
+
 _sep = r'\\' if os.path.sep == '\\' else os.path.sep
 
 SUGGESTIONS = [(re.compile(pattern.replace('/', _sep)), suggestion) for pattern, suggestion in [
@@ -458,21 +536,29 @@ SUGGESTIONS = [(re.compile(pattern.replace('/', _sep)), suggestion) for pattern,
                                     r'recursive-include \1 *.\2'),
 ]]
 
+CFG_SECTION_CHECK_MANIFEST = 'check-manifest'
+CFG_IGNORE_DEFAULT_RULES = (CFG_SECTION_CHECK_MANIFEST, 'ignore-default-rules')
+CFG_IGNORE = (CFG_SECTION_CHECK_MANIFEST, 'ignore')
+CFG_IGNORE_BAD_IDEAS = (CFG_SECTION_CHECK_MANIFEST, 'ignore-bad-ideas')
+
 
 def read_config():
     """Read configuration from setup.cfg."""
     # XXX modifies global state, which is kind of evil
     config = ConfigParser.ConfigParser()
     config.read(['setup.cfg'])
-    if not config.has_section('check-manifest'):
+    if not config.has_section(CFG_SECTION_CHECK_MANIFEST):
         return
-    if (config.has_option('check-manifest', 'ignore-default-rules')
-            and config.getboolean('check-manifest', 'ignore-default-rules')):
+    if (config.has_option(*CFG_IGNORE_DEFAULT_RULES)
+            and config.getboolean(*CFG_IGNORE_DEFAULT_RULES)):
         del IGNORE[:]
-    if config.has_option('check-manifest', 'ignore'):
-        patterns = [p.strip() for p in config.get('check-manifest',
-                                                  'ignore').splitlines()]
+    if config.has_option(*CFG_IGNORE):
+        patterns = [p.strip() for p in config.get(*CFG_IGNORE).splitlines()]
         IGNORE.extend(p for p in patterns if p)
+    if config.has_option(*CFG_IGNORE_BAD_IDEAS):
+        lines = config.get(*CFG_IGNORE_BAD_IDEAS).splitlines()
+        patterns = [p.strip() for p in lines]
+        IGNORE_BAD_IDEAS.extend(p for p in patterns if p)
 
 
 def read_manifest():
@@ -483,9 +569,7 @@ def read_manifest():
     # XXX modifies global state, which is kind of evil
     if not os.path.isfile('MANIFEST.in'):
         return
-    with open('MANIFEST.in') as manifest:
-        contents = manifest.read()
-    ignore, ignore_regexps = _get_ignore_from_manifest(contents)
+    ignore, ignore_regexps = _get_ignore_from_manifest('MANIFEST.in')
     IGNORE.extend(ignore)
     IGNORE_REGEXPS.extend(ignore_regexps)
 
@@ -505,17 +589,47 @@ def _glob_to_regexp(pat):
     return re.sub(r'((?<!\\)(\\\\)*)\.', r'\1[^%s]' % sep, pat)
 
 
-def _get_ignore_from_manifest(contents):
-    """Gather the various ignore patterns from MANIFEST.in.
+def _get_ignore_from_manifest(filename):
+    """Gather the various ignore patterns from a MANIFEST.in.
 
-    'contents' should be a string, which may contain newlines.
+    Returns a list of standard ignore patterns and a list of regular
+    expressions to ignore.
+    """
+
+    class MyTextFile(TextFile):
+        def error(self, msg, line=None):  # pragma: nocover
+            # (this is never called by TextFile in current versions of CPython)
+            raise Failure(self.gen_error(msg, line))
+
+        def warn(self, msg, line=None):
+            warning(self.gen_error(msg, line))
+
+    template = MyTextFile(filename,
+                          strip_comments=True,
+                          skip_blanks=True,
+                          join_lines=True,
+                          lstrip_ws=True,
+                          rstrip_ws=True,
+                          collapse_join=True)
+    try:
+        lines = template.readlines()
+    finally:
+        template.close()
+    return _get_ignore_from_manifest_lines(lines)
+
+
+def _get_ignore_from_manifest_lines(lines):
+    """Gather the various ignore patterns from a MANIFEST.in.
+
+    'lines' should be a list of strings with comments removed
+    and continuation lines joined.
 
     Returns a list of standard ignore patterns and a list of regular
     expressions to ignore.
     """
     ignore = []
     ignore_regexps = []
-    for line in contents.splitlines():
+    for line in lines:
         try:
             cmd, rest = line.split(None, 1)
         except ValueError:
@@ -579,7 +693,9 @@ def _get_ignore_from_manifest(contents):
 
 def file_matches(filename, patterns):
     """Does this filename match any of the patterns?"""
-    return any(fnmatch.fnmatch(filename, pat) for pat in patterns)
+    return any(fnmatch.fnmatch(filename, pat) or
+               fnmatch.fnmatch(os.path.basename(filename), pat)
+               for pat in patterns)
 
 
 def file_matches_regexps(filename, patterns):
@@ -640,7 +756,8 @@ def check_manifest(source_tree='.', create=False, update=False,
     Returns True if the manifest is fine.
     """
     all_ok = True
-    python = os.path.abspath(python)  # in case it was relative
+    if os.path.sep in python:
+        python = os.path.abspath(python)
     with cd(source_tree):
         if not is_package():
             raise Failure('This is not a Python project (no setup.py).')
@@ -724,13 +841,15 @@ def check_manifest(source_tree='.', create=False, update=False,
                      " matching any of the files, sorry!")
             all_ok = False
         bad_ideas = find_bad_ideas(all_source_files)
-        if bad_ideas:
+        filtered_bad_ideas = [bad_idea for bad_idea in bad_ideas
+                              if not file_matches(bad_idea, IGNORE_BAD_IDEAS)]
+        if filtered_bad_ideas:
             warning("you have %s in source control!\nthat's a bad idea:"
                     " auto-generated files should not be versioned"
-                    % bad_ideas[0])
-            if len(bad_ideas) > 1:
+                    % filtered_bad_ideas[0])
+            if len(filtered_bad_ideas) > 1:
                 warning("this also applies to the following:\n%s"
-                        % format_list(bad_ideas[1:]))
+                        % format_list(filtered_bad_ideas[1:]))
             all_ok = False
     return all_ok
 
@@ -758,10 +877,16 @@ def main():
     parser.add_argument('--ignore', metavar='patterns', default=None,
                         help='ignore files/directories matching these'
                              ' comma-separated patterns')
+    parser.add_argument('--ignore-bad-ideas', metavar='patterns',
+                        default=[], help='ignore bad idea files/directories '
+                        'matching these comma-separated patterns')
     args = parser.parse_args()
 
     if args.ignore:
         IGNORE.extend(args.ignore.split(','))
+
+    if args.ignore_bad_ideas:
+        IGNORE_BAD_IDEAS.extend(args.ignore_bad_ideas.split(','))
 
     if args.verbose:
         global VERBOSE
